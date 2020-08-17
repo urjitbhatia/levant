@@ -15,6 +15,13 @@ import (
 
 const (
 	jobStatusRunning = "running"
+
+	DeploymentStatusRunning             = "running"
+	DeploymentStatusPaused              = "paused"
+	DeploymentStatusFailed              = "failed"
+	DeploymentStatusSuccessful          = "successful"
+	DeploymentStatusCancelled           = "cancelled"
+	DeploymentStatusDescriptionNewerJob = "Cancelled due to newer version of job"
 )
 
 // levantDeployment is the all deployment related objects for this Levant
@@ -115,7 +122,6 @@ func (l *levantDeployment) preDeployValidate() (success bool) {
 // deploy triggers a register of the job resulting in a Nomad deployment which
 // is monitored to determine the eventual state.
 func (l *levantDeployment) deploy() (success bool) {
-
 	log.Info().Msgf("levant/deploy: triggering a deployment")
 
 	l.config.Template.Job.VaultToken = &l.config.Deploy.VaultToken
@@ -172,10 +178,26 @@ func (l *levantDeployment) deploy() (success bool) {
 			log.Error().Err(err).Msgf("levant/deploy: unable to get info of evaluation %s", eval.EvalID)
 			return
 		}
-
-		// Get the success of the deployment and return if we have success.
-		if success = l.deploymentWatcher(depID); success {
-			return
+		for {
+			// Get the success of the deployment and return if we have success.
+			// superseded flags if a newer version of the job is now deploying, we start watching that if true
+			superseded := false
+			success, superseded = l.deploymentWatcher(depID)
+			if success {
+				return
+			}
+			if superseded {
+				dep, _, err := l.nomad.Jobs().LatestDeployment(*l.config.Template.Job.ID, nil)
+				if err != nil {
+					log.Error().Err(err).
+						Str("deployID", depID).
+						Msg("levant/deploy: unable to query superseded deployment for a new version")
+					return
+				}
+				depID = dep.ID
+				continue
+			}
+			break
 		}
 
 		dep, _, err := l.nomad.Deployments().Info(depID, nil)
@@ -271,7 +293,7 @@ func (l *levantDeployment) evaluationInspector(evalID *string) error {
 	}
 }
 
-func (l *levantDeployment) deploymentWatcher(depID string) (success bool) {
+func (l *levantDeployment) deploymentWatcher(depID string) (success, superseded bool) {
 
 	var canaryChan chan interface{}
 	deploymentChan := make(chan interface{})
@@ -297,7 +319,7 @@ func (l *levantDeployment) deploymentWatcher(depID string) (success bool) {
 		// the deployment watcher.
 		select {
 		case <-deploymentChan:
-			return false
+			return false, false
 		default:
 			break
 		}
@@ -315,13 +337,17 @@ func (l *levantDeployment) deploymentWatcher(depID string) (success bool) {
 
 		cont, err := l.checkDeploymentStatus(dep, canaryChan)
 		if err != nil {
-			return false
+			if err.Error() == DeploymentStatusDescriptionNewerJob {
+				log.Info().Msg("Deploy was superseded by a newer version")
+				return false, true
+			}
+			return false, false
 		}
 
 		if cont {
 			continue
 		} else {
-			return true
+			return true, false
 		}
 	}
 }
@@ -334,6 +360,12 @@ func (l *levantDeployment) checkDeploymentStatus(dep *nomad.Deployment, shutdown
 		return false, nil
 	case jobStatusRunning:
 		return true, nil
+	case DeploymentStatusCancelled:
+		log.Info().Msgf("levant/deploy: deployment %v was cancelled. Reason: %s", dep.ID, dep.StatusDescription)
+		if strings.HasPrefix(dep.StatusDescription, DeploymentStatusDescriptionNewerJob) {
+			return true, errors.New(DeploymentStatusDescriptionNewerJob)
+		}
+		return false, nil
 	default:
 		if shutdownChan != nil {
 			log.Debug().Msgf("levant/deploy: deployment %v meaning canary auto promote will shutdown", dep.Status)

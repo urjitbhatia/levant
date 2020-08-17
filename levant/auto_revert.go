@@ -29,11 +29,14 @@ func (l *levantDeployment) autoRevert(jobID, depID *string) {
 		}
 
 		log.Info().Msgf("levant/auto_revert: beginning deployment watcher for job %s", *jobID)
-		success := l.deploymentWatcher(dep.ID)
+		success, superseded := l.deploymentWatcher(dep.ID)
 
 		if success {
 			log.Info().Msgf("levant/auto_revert: auto-revert of job %s was successful", *jobID)
 			break
+		} else if superseded {
+			// newer job id deploying - watch that deploy
+			continue
 		} else {
 			log.Error().Msgf("levant/auto_revert: auto-revert of job %s failed; POTENTIAL OUTAGE SITUATION", *jobID)
 			l.checkFailedDeployment(&dep.ID)
