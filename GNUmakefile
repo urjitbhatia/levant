@@ -9,7 +9,7 @@ tools: ## Install the tools used to test and build
 .PHONY: build
 build: ## Build Levant for development purposes
 	@echo "==> Running $@..."
-	govvv build -o levant-local . -version local
+	build -o levant-local . -version local
 
 .PHONY: test
 test: ## Run the Levant test suite with coverage
